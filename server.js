@@ -23,6 +23,7 @@ async function initYtDlp() {
   await YTDlpWrap.downloadFromGithub(YTDLP_PATH);
   ytDlp = new YTDlpWrap(YTDLP_PATH);
   console.log('yt-dlp ready');
+  exec('/tmp/yt-dlp --version', (e, out) => console.log('yt-dlp version:', out, e?.message));
 }
 
 app.get('/', (req, res) => res.json({ status: 'ok', service: 'gif-banner-api' }));
