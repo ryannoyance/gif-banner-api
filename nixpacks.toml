@@ -1,2 +1,5 @@
 [phases.setup]
-nixPkgs = ["ffmpeg", "python3"]
+nixPkgs = ["ffmpeg", "python311", "python311Packages.pip"]
+
+[start]
+cmd = "node server.js"
