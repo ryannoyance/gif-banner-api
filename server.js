@@ -7,6 +7,7 @@ const path = require('path');
 const os = require('os');
 const { exec } = require('child_process');
 const YTDlpWrap = require('yt-dlp-wrap').default;
+process.env.PATH = `/nix/var/nix/profiles/default/bin:${process.env.PATH}`;
 
 const app = express();
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type'] }));
