@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const axios = require('axios');
+const crypto = require('crypto');
 const YTDlpWrap = require('yt-dlp-wrap').default;
 
 // Detect ffmpeg path: prefer system binary, fall back to ffmpeg-static
@@ -30,6 +31,16 @@ const PORT = process.env.PORT || 3000;
 const YTDLP_PATH = path.join(os.tmpdir(), 'yt-dlp');
 let ytDlp;
 
+// Unwrap array values from WeWeb variable chips
+function unwrap(val) {
+  if (Array.isArray(val)) return val[0];
+  return val;
+}
+
+function uid() {
+  return crypto.randomBytes(8).toString('hex');
+}
+
 async function initYtDlp() {
   console.log('Downloading yt-dlp standalone binary...');
   const response = await axios.get(
@@ -47,7 +58,7 @@ async function initYtDlp() {
 app.get('/', (req, res) => res.json({ status: 'ok', service: 'gif-banner-api' }));
 
 async function downloadClip(url) {
-  const tmpFile = path.join(os.tmpdir(), `clip_${Date.now()}.mp4`);
+  const tmpFile = path.join(os.tmpdir(), `clip_${uid()}.mp4`);
   console.log('Starting download:', url);
   try {
     await ytDlp.execPromise([
@@ -83,14 +94,14 @@ function getVideoDuration(filePath) {
   });
 }
 
-// Extract frames as PNG buffers from a clip at given fps
+// Extract frames as PNG buffers from a clip
 function extractFrames(filePath, startTime, duration, fps) {
   return new Promise(async (resolve, reject) => {
     const videoDuration = await getVideoDuration(filePath);
     const safeStart = Math.min(parseFloat(startTime || 0), videoDuration - 0.5);
     const safeDuration = Math.min(parseFloat(duration || 5), videoDuration - safeStart);
-    const framesDir = path.join(os.tmpdir(), `frames_${Date.now()}`);
-    fs.mkdirSync(framesDir);
+    const framesDir = path.join(os.tmpdir(), `frames_${uid()}`);
+    fs.mkdirSync(framesDir, { recursive: true });
     console.log(`Extracting frames: start=${safeStart}s duration=${safeDuration}s fps=${fps} from ${filePath}`);
 
     ffmpeg(filePath)
@@ -104,10 +115,9 @@ function extractFrames(filePath, startTime, duration, fps) {
           .filter(f => f.endsWith('.png'))
           .sort()
           .map(f => fs.readFileSync(path.join(framesDir, f)));
-        // Cleanup
         fs.readdirSync(framesDir).forEach(f => fs.unlinkSync(path.join(framesDir, f)));
         fs.rmdirSync(framesDir);
-        console.log(`Extracted ${files.length} frames from ${filePath}`);
+        console.log(`Extracted ${files.length} frames`);
         resolve(files);
       })
       .on('error', (err) => {
@@ -127,10 +137,10 @@ function extractGifFromFile(filePath, startTime, duration) {
   return new Promise(async (resolve, reject) => {
     const videoDuration = await getVideoDuration(filePath);
     const safeStart = Math.min(parseFloat(startTime || 0), videoDuration - 1);
-    const safeDuration = Math.min(parseFloat(duration || 3), videoDuration - safeStart);
+    const safeDuration = Math.min(parseFloat(duration || 5), videoDuration - safeStart);
     console.log(`Extracting GIF: start=${safeStart}s duration=${safeDuration}s from ${filePath}`);
 
-    const tmpGif = path.join(os.tmpdir(), `preview_${Date.now()}.gif`);
+    const tmpGif = path.join(os.tmpdir(), `preview_${uid()}.gif`);
     ffmpeg(filePath)
       .seekInput(safeStart)
       .duration(safeDuration)
@@ -160,10 +170,8 @@ function extractGifFromFile(filePath, startTime, duration) {
   });
 }
 
-// Build animated GIF from frame rows using sharp + manual GIF encoding via ffmpeg
+// Build animated GIF banner from 3 sets of frames
 async function buildAnimatedBanner(frameRows, fps) {
-  // frameRows is array of 3 arrays of PNG buffers (one per clip)
-  // Normalize to shortest clip length
   const minFrames = Math.min(...frameRows.map(f => f.length));
   console.log(`Building banner: ${minFrames} frames at ${fps}fps, 744x400`);
 
@@ -172,12 +180,10 @@ async function buildAnimatedBanner(frameRows, fps) {
   const PANEL_W = 248;
   const PANEL_H = 400;
 
-  // Write composited frames to temp dir
-  const framesDir = path.join(os.tmpdir(), `banner_${Date.now()}`);
-  fs.mkdirSync(framesDir);
+  const framesDir = path.join(os.tmpdir(), `banner_${uid()}`);
+  fs.mkdirSync(framesDir, { recursive: true });
 
   for (let i = 0; i < minFrames; i++) {
-    // Resize each panel frame
     const panels = await Promise.all(
       frameRows.map(frames =>
         sharp(frames[i])
@@ -187,7 +193,6 @@ async function buildAnimatedBanner(frameRows, fps) {
       )
     );
 
-    // Composite all 3 panels side by side
     const composite = await sharp({
       create: { width: BANNER_W, height: BANNER_H, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 1 } }
     })
@@ -204,8 +209,7 @@ async function buildAnimatedBanner(frameRows, fps) {
 
   console.log(`Composited ${minFrames} banner frames, generating GIF...`);
 
-  // Use ffmpeg to turn frames into animated GIF with palette
-  const outputGif = path.join(os.tmpdir(), `banner_${Date.now()}.gif`);
+  const outputGif = path.join(os.tmpdir(), `banner_${uid()}.gif`);
   await new Promise((resolve, reject) => {
     ffmpeg()
       .input(path.join(framesDir, 'frame_%04d.png'))
@@ -227,7 +231,6 @@ async function buildAnimatedBanner(frameRows, fps) {
       .run();
   });
 
-  // Cleanup frames dir
   fs.readdirSync(framesDir).forEach(f => fs.unlinkSync(path.join(framesDir, f)));
   fs.rmdirSync(framesDir);
 
@@ -240,7 +243,9 @@ async function buildAnimatedBanner(frameRows, fps) {
 app.post('/preview-clip', async (req, res) => {
   try {
     console.log('Body received:', JSON.stringify(req.body));
-    const { url, start, duration } = req.body;
+    const url = unwrap(req.body.url);
+    const start = unwrap(req.body.start);
+    const duration = unwrap(req.body.duration);
     if (!url) return res.status(400).json({ error: 'URL is required' });
     const clipFile = await downloadClip(url);
     const gifBuf = await extractGifFromFile(clipFile, start, duration);
@@ -260,17 +265,25 @@ app.post('/generate-banner', async (req, res) => {
 
     const FPS = 10;
 
+    // Unwrap any array values from WeWeb
+    const normalizedClips = clips.map((clip, i) => {
+      const url = unwrap(clip.url);
+      const start = unwrap(clip.start);
+      const duration = unwrap(clip.duration);
+      if (!url) throw new Error(`Clip ${i + 1} has no URL`);
+      return { url, start, duration };
+    });
+
+    console.log('Normalized clips:', JSON.stringify(normalizedClips));
+
     // Download all 3 clips in parallel
     console.log('Downloading all 3 clips...');
-    const clipFiles = await Promise.all(clips.map(clip => {
-      if (!clip.url) throw new Error('Each clip must have a URL');
-      return downloadClip(clip.url);
-    }));
+    const clipFiles = await Promise.all(normalizedClips.map(clip => downloadClip(clip.url)));
 
     // Extract frames from all 3 clips in parallel
     console.log('Extracting frames from all 3 clips...');
     const frameRows = await Promise.all(
-      clipFiles.map((file, i) => extractFrames(file, clips[i].start, clips[i].duration, FPS))
+      clipFiles.map((file, i) => extractFrames(file, normalizedClips[i].start, normalizedClips[i].duration, FPS))
     );
 
     // Cleanup clip files
