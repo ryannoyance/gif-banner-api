@@ -7,7 +7,6 @@ const path = require('path');
 const os = require('os');
 const { exec } = require('child_process');
 const YTDlpWrap = require('yt-dlp-wrap').default;
-process.env.PATH = `/nix/var/nix/profiles/default/bin:${process.env.PATH}`;
 
 const app = express();
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type'] }));
@@ -23,7 +22,6 @@ async function initYtDlp() {
   await YTDlpWrap.downloadFromGithub(YTDLP_PATH);
   ytDlp = new YTDlpWrap(YTDLP_PATH);
   console.log('yt-dlp ready');
-  exec('/tmp/yt-dlp --version', (e, out) => console.log('yt-dlp version:', out, e?.message));
 }
 
 app.get('/', (req, res) => res.json({ status: 'ok', service: 'gif-banner-api' }));
