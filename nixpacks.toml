@@ -1,5 +1,2 @@
 [phases.setup]
-nixPkgs = ["ffmpeg", "python3Full"]
-
-[phases.install]
-cmds = ["npm install", "ln -sf $(which python3) /usr/local/bin/python3 || true"]
+nixPkgs = ["ffmpeg"]
