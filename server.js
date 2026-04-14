@@ -48,33 +48,50 @@ app.get('/', (req, res) => res.json({ status: 'ok', service: 'gif-banner-api' })
 
 async function downloadClip(url) {
   const tmpFile = path.join(os.tmpdir(), `clip_${Date.now()}.mp4`);
-  await ytDlp.execPromise([
-    url,
-    '-f', 'best',
-    '--no-playlist',
-    '-o', tmpFile
-  ]);
-  return tmpFile;
+  console.log('Starting download:', url);
+  try {
+    await ytDlp.execPromise([
+      url,
+      '-f', 'best',
+      '--no-playlist',
+      '--socket-timeout', '30',
+      '--retries', '2',
+      '-o', tmpFile
+    ]);
+    console.log('Download complete:', tmpFile);
+    if (!fs.existsSync(tmpFile)) throw new Error('Downloaded file not found after yt-dlp');
+    const size = fs.statSync(tmpFile).size;
+    console.log('File size:', size, 'bytes');
+    return tmpFile;
+  } catch(err) {
+    console.error('Download failed:', err.message);
+    throw err;
+  }
 }
 
 function extractFrameFromFile(filePath, startTime) {
   return new Promise((resolve, reject) => {
     const tmpPng = path.join(os.tmpdir(), `frame_${Date.now()}.png`);
+    console.log('Extracting frame at', startTime, 'from', filePath);
     ffmpeg(filePath)
       .seekInput(startTime)
       .frames(1)
       .output(tmpPng)
+      .on('start', (cmd) => console.log('ffmpeg command:', cmd))
       .on('end', () => {
+        console.log('ffmpeg finished');
         if (!fs.existsSync(tmpPng)) {
           try { fs.unlinkSync(filePath); } catch(e) {}
-          return reject(new Error('ffmpeg did not produce output frame — check ffmpeg is installed'));
+          return reject(new Error('ffmpeg did not produce output frame'));
         }
         const buf = fs.readFileSync(tmpPng);
         fs.unlinkSync(tmpPng);
         try { fs.unlinkSync(filePath); } catch(e) {}
+        console.log('Frame extracted, size:', buf.length, 'bytes');
         resolve(buf);
       })
       .on('error', (err) => {
+        console.error('ffmpeg error:', err.message);
         try { fs.unlinkSync(filePath); } catch(e) {}
         reject(err);
       })
@@ -88,8 +105,10 @@ app.post('/preview-clip', async (req, res) => {
     const { url, start, duration } = req.body;
     if (!url) return res.status(400).json({ error: 'URL is required' });
     const midTime = parseFloat(start || 0) + parseFloat(duration || 5) / 2;
+    console.log('Preview midTime:', midTime);
     const clipFile = await downloadClip(url);
     const frameBuf = await extractFrameFromFile(clipFile, midTime);
+    console.log('Sending preview response');
     res.json({ previewUrl: `data:image/png;base64,${frameBuf.toString('base64')}` });
   } catch (err) {
     console.error('Error:', err.message);
@@ -103,15 +122,19 @@ app.post('/generate-banner', async (req, res) => {
     const { clips } = req.body;
     if (!clips || clips.length !== 3) return res.status(400).json({ error: 'Exactly 3 clips required' });
     const frameBuffers = [];
-    for (const clip of clips) {
-      if (!clip.url) return res.status(400).json({ error: 'Each clip must have a URL' });
+    for (const [i, clip] of clips.entries()) {
+      if (!clip.url) return res.status(400).json({ error: `Clip ${i + 1} has no URL` });
       const midTime = parseFloat(clip.start || 0) + parseFloat(clip.duration || 5) / 2;
+      console.log(`Processing clip ${i + 1}:`, clip.url, 'midTime:', midTime);
       const clipFile = await downloadClip(clip.url);
       const frameBuf = await extractFrameFromFile(clipFile, midTime);
       frameBuffers.push(frameBuf);
+      console.log(`Clip ${i + 1} done`);
     }
+    console.log('Compositing banner...');
     const meta = await sharp(frameBuffers[0]).metadata();
     const targetW = meta.width, targetH = meta.height;
+    console.log('Frame dimensions:', targetW, 'x', targetH);
     const resized = await Promise.all(
       frameBuffers.map(buf => sharp(buf).resize(targetW, targetH, { fit: 'cover' }).png().toBuffer())
     );
@@ -124,6 +147,7 @@ app.post('/generate-banner', async (req, res) => {
         { input: resized[2], left: targetW * 2, top: 0 }
       ])
       .png().toBuffer();
+    console.log('Banner created, size:', banner.length, 'bytes');
     res.json({ bannerUrl: `data:image/png;base64,${banner.toString('base64')}` });
   } catch (err) {
     console.error('Error:', err.message);
