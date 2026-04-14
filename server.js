@@ -5,6 +5,7 @@ const sharp = require('sharp');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const https = require('https');
 const { exec } = require('child_process');
 const YTDlpWrap = require('yt-dlp-wrap').default;
 
@@ -16,8 +17,6 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const YTDLP_PATH = path.join(os.tmpdir(), 'yt-dlp');
 let ytDlp;
-
-const https = require('https');
 
 async function initYtDlp() {
   console.log('Downloading yt-dlp standalone binary...');
@@ -36,6 +35,7 @@ async function initYtDlp() {
 app.get('/', (req, res) => res.json({ status: 'ok', service: 'gif-banner-api' }));
 
 async function getDirectVideoUrl(url) {
+  console.log('Getting URL for:', url);
   const output = await ytDlp.execPromise([url, '-f', 'best[height<=720]', '--get-url', '--no-playlist']);
   return output.trim().split('\n')[0];
 }
@@ -55,13 +55,14 @@ function extractFrame(videoUrl, startTime) {
 
 app.post('/preview-clip', async (req, res) => {
   try {
+    console.log('Body received:', JSON.stringify(req.body));
     const { url, start, duration } = req.body;
     const directUrl = await getDirectVideoUrl(url);
     const midTime = parseFloat(start || 0) + parseFloat(duration || 5) / 2;
     const frameBuf = await extractFrame(directUrl, midTime);
     res.json({ previewUrl: `data:image/png;base64,${frameBuf.toString('base64')}` });
   } catch (err) {
-    console.error(err);
+    console.error('Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -84,7 +85,7 @@ app.post('/generate-banner', async (req, res) => {
       .png().toBuffer();
     res.json({ bannerUrl: `data:image/png;base64,${banner.toString('base64')}` });
   } catch (err) {
-    console.error(err);
+    console.error('Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
