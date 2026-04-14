@@ -14,4 +14,8 @@
     "tmp": "^0.2.1",
     "yt-dlp-wrap": "^2.3.12"
   }
+  "scripts": {
+  "start": "node server.js",
+  "build": "pip3 install -U yt-dlp || true"
+}
 }
