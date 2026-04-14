@@ -1,15 +1,14 @@
 const express = require('express');
 const cors = require('cors');
 const ffmpeg = require('fluent-ffmpeg');
-const ffmpegStatic = require('ffmpeg-static');
 const sharp = require('sharp');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const https = require('https');
 const axios = require('axios');
 const YTDlpWrap = require('yt-dlp-wrap').default;
 
+// Use system ffmpeg installed via nixpacks
 ffmpeg.setFfmpegPath('ffmpeg');
 
 const app = express();
@@ -56,6 +55,10 @@ function extractFrameFromFile(filePath, startTime) {
       .frames(1)
       .output(tmpPng)
       .on('end', () => {
+        if (!fs.existsSync(tmpPng)) {
+          try { fs.unlinkSync(filePath); } catch(e) {}
+          return reject(new Error('ffmpeg did not produce output frame — check ffmpeg is installed'));
+        }
         const buf = fs.readFileSync(tmpPng);
         fs.unlinkSync(tmpPng);
         try { fs.unlinkSync(filePath); } catch(e) {}
@@ -73,6 +76,7 @@ app.post('/preview-clip', async (req, res) => {
   try {
     console.log('Body received:', JSON.stringify(req.body));
     const { url, start, duration } = req.body;
+    if (!url) return res.status(400).json({ error: 'URL is required' });
     const midTime = parseFloat(start || 0) + parseFloat(duration || 5) / 2;
     const clipFile = await downloadClip(url);
     const frameBuf = await extractFrameFromFile(clipFile, midTime);
@@ -90,6 +94,7 @@ app.post('/generate-banner', async (req, res) => {
     if (!clips || clips.length !== 3) return res.status(400).json({ error: 'Exactly 3 clips required' });
     const frameBuffers = [];
     for (const clip of clips) {
+      if (!clip.url) return res.status(400).json({ error: 'Each clip must have a URL' });
       const midTime = parseFloat(clip.start || 0) + parseFloat(clip.duration || 5) / 2;
       const clipFile = await downloadClip(clip.url);
       const frameBuf = await extractFrameFromFile(clipFile, midTime);
