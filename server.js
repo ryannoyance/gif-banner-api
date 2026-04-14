@@ -1,15 +1,15 @@
 const express = require('express');
 const cors = require('cors');
 const ffmpeg = require('fluent-ffmpeg');
+const ffmpegStatic = require('ffmpeg-static');
 const sharp = require('sharp');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const https = require('https');
-const { exec } = require('child_process');
+const axios = require('axios');
 const YTDlpWrap = require('yt-dlp-wrap').default;
 
-const ffmpegStatic = require('ffmpeg-static');
 ffmpeg.setFfmpegPath(ffmpegStatic);
 
 const app = express();
@@ -23,44 +23,48 @@ let ytDlp;
 
 async function initYtDlp() {
   console.log('Downloading yt-dlp standalone binary...');
-  const axios = require('axios');
   const response = await axios.get(
     'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux',
     { responseType: 'arraybuffer', maxRedirects: 10 }
   );
   fs.writeFileSync(YTDLP_PATH, response.data);
   fs.chmodSync(YTDLP_PATH, '755');
-
-  // Verify it's a real binary
   const size = fs.statSync(YTDLP_PATH).size;
   console.log(`yt-dlp downloaded, size: ${size} bytes`);
-
   ytDlp = new YTDlpWrap(YTDLP_PATH);
   console.log('yt-dlp ready');
 }
 
 app.get('/', (req, res) => res.json({ status: 'ok', service: 'gif-banner-api' }));
 
-async function getDirectVideoUrl(url) {
-  console.log('Getting URL for:', url);
-  const output = await ytDlp.execPromise([
+async function downloadClip(url) {
+  const tmpFile = path.join(os.tmpdir(), `clip_${Date.now()}.mp4`);
+  await ytDlp.execPromise([
     url,
     '-f', 'best',
-    '--get-url',
-    '--no-playlist'
+    '--no-playlist',
+    '-o', tmpFile
   ]);
-  return output.trim().split('\n')[0];
+  return tmpFile;
 }
 
-function extractFrame(videoUrl, startTime) {
+function extractFrameFromFile(filePath, startTime) {
   return new Promise((resolve, reject) => {
-    const tmpFile = path.join(os.tmpdir(), `frame_${Date.now()}.png`);
-    ffmpeg(videoUrl)
+    const tmpPng = path.join(os.tmpdir(), `frame_${Date.now()}.png`);
+    ffmpeg(filePath)
       .seekInput(startTime)
       .frames(1)
-      .output(tmpFile)
-      .on('end', () => { const buf = fs.readFileSync(tmpFile); fs.unlinkSync(tmpFile); resolve(buf); })
-      .on('error', reject)
+      .output(tmpPng)
+      .on('end', () => {
+        const buf = fs.readFileSync(tmpPng);
+        fs.unlinkSync(tmpPng);
+        try { fs.unlinkSync(filePath); } catch(e) {}
+        resolve(buf);
+      })
+      .on('error', (err) => {
+        try { fs.unlinkSync(filePath); } catch(e) {}
+        reject(err);
+      })
       .run();
   });
 }
@@ -69,9 +73,9 @@ app.post('/preview-clip', async (req, res) => {
   try {
     console.log('Body received:', JSON.stringify(req.body));
     const { url, start, duration } = req.body;
-    const directUrl = await getDirectVideoUrl(url);
     const midTime = parseFloat(start || 0) + parseFloat(duration || 5) / 2;
-    const frameBuf = await extractFrame(directUrl, midTime);
+    const clipFile = await downloadClip(url);
+    const frameBuf = await extractFrameFromFile(clipFile, midTime);
     res.json({ previewUrl: `data:image/png;base64,${frameBuf.toString('base64')}` });
   } catch (err) {
     console.error('Error:', err.message);
@@ -81,19 +85,29 @@ app.post('/preview-clip', async (req, res) => {
 
 app.post('/generate-banner', async (req, res) => {
   try {
+    console.log('Generate banner body:', JSON.stringify(req.body));
     const { clips } = req.body;
     if (!clips || clips.length !== 3) return res.status(400).json({ error: 'Exactly 3 clips required' });
     const frameBuffers = [];
     for (const clip of clips) {
-      const directUrl = await getDirectVideoUrl(clip.url);
       const midTime = parseFloat(clip.start || 0) + parseFloat(clip.duration || 5) / 2;
-      frameBuffers.push(await extractFrame(directUrl, midTime));
+      const clipFile = await downloadClip(clip.url);
+      const frameBuf = await extractFrameFromFile(clipFile, midTime);
+      frameBuffers.push(frameBuf);
     }
     const meta = await sharp(frameBuffers[0]).metadata();
     const targetW = meta.width, targetH = meta.height;
-    const resized = await Promise.all(frameBuffers.map(buf => sharp(buf).resize(targetW, targetH, { fit: 'cover' }).png().toBuffer()));
-    const banner = await sharp({ create: { width: targetW * 3, height: targetH, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 1 } } })
-      .composite([{ input: resized[0], left: 0, top: 0 }, { input: resized[1], left: targetW, top: 0 }, { input: resized[2], left: targetW * 2, top: 0 }])
+    const resized = await Promise.all(
+      frameBuffers.map(buf => sharp(buf).resize(targetW, targetH, { fit: 'cover' }).png().toBuffer())
+    );
+    const banner = await sharp({
+      create: { width: targetW * 3, height: targetH, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 1 } }
+    })
+      .composite([
+        { input: resized[0], left: 0, top: 0 },
+        { input: resized[1], left: targetW, top: 0 },
+        { input: resized[2], left: targetW * 2, top: 0 }
+      ])
       .png().toBuffer();
     res.json({ bannerUrl: `data:image/png;base64,${banner.toString('base64')}` });
   } catch (err) {
