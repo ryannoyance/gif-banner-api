@@ -10,7 +10,8 @@ const https = require('https');
 const axios = require('axios');
 const YTDlpWrap = require('yt-dlp-wrap').default;
 
-ffmpeg.setFfmpegPath(ffmpegStatic);
+const ffmpegPath = ffmpegStatic || 'ffmpeg';
+ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type'] }));
