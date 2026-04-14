@@ -69,12 +69,68 @@ async function downloadClip(url) {
   }
 }
 
-function extractFrameFromFile(filePath, startTime) {
-  return new Promise((resolve, reject) => {
-    const tmpPng = path.join(os.tmpdir(), `frame_${Date.now()}.png`);
-    console.log('Extracting frame at', startTime, 'from', filePath);
+function getVideoDuration(filePath) {
+  return new Promise((resolve) => {
+    ffmpeg.ffprobe(filePath, (err, metadata) => {
+      if (err) {
+        console.warn('ffprobe failed, using fallback duration:', err.message);
+        return resolve(30);
+      }
+      const duration = metadata.format.duration || 30;
+      console.log('Video duration:', duration, 'seconds');
+      resolve(duration);
+    });
+  });
+}
+
+function extractGifFromFile(filePath, startTime, duration) {
+  return new Promise(async (resolve, reject) => {
+    const videoDuration = await getVideoDuration(filePath);
+    const safeStart = Math.min(parseFloat(startTime || 0), videoDuration - 1);
+    const safeDuration = Math.min(parseFloat(duration || 3), videoDuration - safeStart);
+    console.log(`Extracting GIF: start=${safeStart}s duration=${safeDuration}s from ${filePath}`);
+
+    const tmpGif = path.join(os.tmpdir(), `preview_${Date.now()}.gif`);
     ffmpeg(filePath)
-      .seekInput(startTime)
+      .seekInput(safeStart)
+      .duration(safeDuration)
+      .fps(10)
+      .size('480x?')
+      .output(tmpGif)
+      .outputOptions([
+        '-vf', 'fps=10,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse'
+      ])
+      .on('start', (cmd) => console.log('ffmpeg command:', cmd))
+      .on('end', () => {
+        console.log('ffmpeg GIF finished');
+        if (!fs.existsSync(tmpGif)) {
+          try { fs.unlinkSync(filePath); } catch(e) {}
+          return reject(new Error('ffmpeg did not produce output GIF'));
+        }
+        const buf = fs.readFileSync(tmpGif);
+        fs.unlinkSync(tmpGif);
+        try { fs.unlinkSync(filePath); } catch(e) {}
+        console.log('GIF extracted, size:', buf.length, 'bytes');
+        resolve(buf);
+      })
+      .on('error', (err) => {
+        console.error('ffmpeg error:', err.message);
+        try { fs.unlinkSync(filePath); } catch(e) {}
+        reject(err);
+      })
+      .run();
+  });
+}
+
+function extractFrameFromFile(filePath, requestedTime) {
+  return new Promise(async (resolve, reject) => {
+    const duration = await getVideoDuration(filePath);
+    const safeTime = Math.min(requestedTime, duration - 0.5);
+    console.log(`Extracting frame at ${safeTime}s (requested ${requestedTime}s, duration ${duration}s)`);
+
+    const tmpPng = path.join(os.tmpdir(), `frame_${Date.now()}.png`);
+    ffmpeg(filePath)
+      .seekInput(safeTime)
       .frames(1)
       .output(tmpPng)
       .on('start', (cmd) => console.log('ffmpeg command:', cmd))
@@ -104,12 +160,11 @@ app.post('/preview-clip', async (req, res) => {
     console.log('Body received:', JSON.stringify(req.body));
     const { url, start, duration } = req.body;
     if (!url) return res.status(400).json({ error: 'URL is required' });
-    const midTime = parseFloat(start || 0) + parseFloat(duration || 5) / 2;
-    console.log('Preview midTime:', midTime);
+    console.log('Generating GIF preview, start:', start, 'duration:', duration);
     const clipFile = await downloadClip(url);
-    const frameBuf = await extractFrameFromFile(clipFile, midTime);
-    console.log('Sending preview response');
-    res.json({ previewUrl: `data:image/png;base64,${frameBuf.toString('base64')}` });
+    const gifBuf = await extractGifFromFile(clipFile, start, duration);
+    console.log('Sending GIF preview response');
+    res.json({ previewUrl: `data:image/gif;base64,${gifBuf.toString('base64')}` });
   } catch (err) {
     console.error('Error:', err.message);
     res.status(500).json({ error: err.message });
