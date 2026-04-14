@@ -20,10 +20,13 @@ app.get('/', (req, res) => res.json({ status: 'ok', service: 'gif-banner-api' })
 // Helper: run yt-dlp to get direct video URL
 function getDirectVideoUrl(url) {
   return new Promise((resolve, reject) => {
-    exec(`yt-dlp -g --no-playlist -f "best[height<=720]" "${url}"`, (err, stdout, stderr) => {
-      if (err) reject(new Error(stderr || err.message));
-      else resolve(stdout.trim().split('\n')[0]);
-    });
+    exec(
+      `yt-dlp -g --no-playlist -f "best[height<=720]" --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" "${url}"`,
+      (err, stdout, stderr) => {
+        if (err) reject(new Error(stderr || err.message));
+        else resolve(stdout.trim().split('\n')[0]);
+      }
+    );
   });
 }
 
