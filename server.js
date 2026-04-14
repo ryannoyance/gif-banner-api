@@ -40,7 +40,12 @@ app.get('/', (req, res) => res.json({ status: 'ok', service: 'gif-banner-api' })
 
 async function getDirectVideoUrl(url) {
   console.log('Getting URL for:', url);
-  const output = await ytDlp.execPromise([url, '-f', 'best[height<=720]', '--get-url', '--no-playlist']);
+  const output = await ytDlp.execPromise([
+    url,
+    '-f', 'best',
+    '--get-url',
+    '--no-playlist'
+  ]);
   return output.trim().split('\n')[0];
 }
 
