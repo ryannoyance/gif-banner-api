@@ -1,0 +1,10 @@
+[phases.setup]
+nixPkgs = ["ffmpeg", "yt-dlp", "python3"]
+```
+
+---
+
+### `.gitignore`
+```
+node_modules/
+*.log
