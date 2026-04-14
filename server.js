@@ -17,9 +17,18 @@ const PORT = process.env.PORT || 3000;
 const YTDLP_PATH = path.join(os.tmpdir(), 'yt-dlp');
 let ytDlp;
 
+const https = require('https');
+
 async function initYtDlp() {
-  console.log('Downloading yt-dlp binary...');
-  await YTDlpWrap.downloadFromGithub(YTDLP_PATH);
+  console.log('Downloading yt-dlp standalone binary...');
+  await new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(YTDLP_PATH);
+    https.get('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux', res => {
+      res.pipe(file);
+      file.on('finish', () => file.close(resolve));
+    }).on('error', reject);
+  });
+  fs.chmodSync(YTDLP_PATH, '755');
   ytDlp = new YTDlpWrap(YTDLP_PATH);
   console.log('yt-dlp ready');
 }
