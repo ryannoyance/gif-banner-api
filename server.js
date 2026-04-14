@@ -31,7 +31,13 @@ const PORT = process.env.PORT || 3000;
 const YTDLP_PATH = path.join(os.tmpdir(), 'yt-dlp');
 let ytDlp;
 
-// Unwrap array values from WeWeb variable chips
+const FPS = 8;
+const BANNER_W = 744;
+const BANNER_H = 400;
+const PANEL_W = 248;
+const PANEL_H = 400;
+const BATCH_SIZE = 5; // composite frames in batches to limit memory
+
 function unwrap(val) {
   if (Array.isArray(val)) return val[0];
   return val;
@@ -60,72 +66,54 @@ app.get('/', (req, res) => res.json({ status: 'ok', service: 'gif-banner-api' })
 async function downloadClip(url) {
   const tmpFile = path.join(os.tmpdir(), `clip_${uid()}.mp4`);
   console.log('Starting download:', url);
-  try {
-    await ytDlp.execPromise([
-      url,
-      '-f', 'best',
-      '--no-playlist',
-      '--socket-timeout', '30',
-      '--retries', '2',
-      '-o', tmpFile
-    ]);
-    console.log('Download complete:', tmpFile);
-    if (!fs.existsSync(tmpFile)) throw new Error('Downloaded file not found after yt-dlp');
-    const size = fs.statSync(tmpFile).size;
-    console.log('File size:', size, 'bytes');
-    return tmpFile;
-  } catch(err) {
-    console.error('Download failed:', err.message);
-    throw err;
-  }
+  await ytDlp.execPromise([
+    url,
+    '-f', 'best',
+    '--no-playlist',
+    '--socket-timeout', '30',
+    '--retries', '2',
+    '-o', tmpFile
+  ]);
+  if (!fs.existsSync(tmpFile)) throw new Error('Downloaded file not found after yt-dlp');
+  console.log('Download complete, size:', fs.statSync(tmpFile).size, 'bytes');
+  return tmpFile;
 }
 
 function getVideoDuration(filePath) {
   return new Promise((resolve) => {
     ffmpeg.ffprobe(filePath, (err, metadata) => {
-      if (err) {
-        console.warn('ffprobe failed, using fallback duration:', err.message);
-        return resolve(30);
-      }
-      const duration = metadata.format.duration || 30;
-      console.log('Video duration:', duration, 'seconds');
-      resolve(duration);
+      if (err) return resolve(30);
+      resolve(metadata.format.duration || 30);
     });
   });
 }
 
-// Extract frames as PNG buffers from a clip
-function extractFrames(filePath, startTime, duration, fps) {
+// Extract frames to disk, return array of file paths (not buffers)
+function extractFramesToDisk(filePath, startTime, duration, fps) {
   return new Promise(async (resolve, reject) => {
     const videoDuration = await getVideoDuration(filePath);
     const safeStart = Math.min(parseFloat(startTime || 0), videoDuration - 0.5);
     const safeDuration = Math.min(parseFloat(duration || 5), videoDuration - safeStart);
     const framesDir = path.join(os.tmpdir(), `frames_${uid()}`);
     fs.mkdirSync(framesDir, { recursive: true });
-    console.log(`Extracting frames: start=${safeStart}s duration=${safeDuration}s fps=${fps} from ${filePath}`);
+    console.log(`Extracting frames: start=${safeStart}s duration=${safeDuration}s fps=${fps}`);
 
     ffmpeg(filePath)
       .seekInput(safeStart)
       .duration(safeDuration)
       .fps(fps)
       .output(path.join(framesDir, 'frame_%04d.png'))
-      .on('start', (cmd) => console.log('ffmpeg frames command:', cmd))
       .on('end', () => {
         const files = fs.readdirSync(framesDir)
           .filter(f => f.endsWith('.png'))
           .sort()
-          .map(f => fs.readFileSync(path.join(framesDir, f)));
-        fs.readdirSync(framesDir).forEach(f => fs.unlinkSync(path.join(framesDir, f)));
-        fs.rmdirSync(framesDir);
-        console.log(`Extracted ${files.length} frames`);
-        resolve(files);
+          .map(f => path.join(framesDir, f));
+        console.log(`Extracted ${files.length} frames to ${framesDir}`);
+        resolve({ files, dir: framesDir });
       })
       .on('error', (err) => {
         console.error('ffmpeg frames error:', err.message);
-        try {
-          fs.readdirSync(framesDir).forEach(f => fs.unlinkSync(path.join(framesDir, f)));
-          fs.rmdirSync(framesDir);
-        } catch(e) {}
+        try { fs.rmSync(framesDir, { recursive: true }); } catch(e) {}
         reject(err);
       })
       .run();
@@ -138,7 +126,7 @@ function extractGifFromFile(filePath, startTime, duration) {
     const videoDuration = await getVideoDuration(filePath);
     const safeStart = Math.min(parseFloat(startTime || 0), videoDuration - 1);
     const safeDuration = Math.min(parseFloat(duration || 5), videoDuration - safeStart);
-    console.log(`Extracting GIF: start=${safeStart}s duration=${safeDuration}s from ${filePath}`);
+    console.log(`Extracting GIF: start=${safeStart}s duration=${safeDuration}s`);
 
     const tmpGif = path.join(os.tmpdir(), `preview_${uid()}.gif`);
     ffmpeg(filePath)
@@ -148,9 +136,7 @@ function extractGifFromFile(filePath, startTime, duration) {
       .outputOptions([
         '-vf', 'fps=10,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse'
       ])
-      .on('start', (cmd) => console.log('ffmpeg GIF command:', cmd))
       .on('end', () => {
-        console.log('ffmpeg GIF finished');
         if (!fs.existsSync(tmpGif)) {
           try { fs.unlinkSync(filePath); } catch(e) {}
           return reject(new Error('ffmpeg did not produce output GIF'));
@@ -170,60 +156,60 @@ function extractGifFromFile(filePath, startTime, duration) {
   });
 }
 
-// Build animated GIF banner from 3 sets of frames
-async function buildAnimatedBanner(frameRows, fps) {
-  const minFrames = Math.min(...frameRows.map(f => f.length));
-  console.log(`Building banner: ${minFrames} frames at ${fps}fps, 744x400`);
+// Build animated GIF banner sequentially in batches
+async function buildAnimatedBanner(frameSets) {
+  const minFrames = Math.min(...frameSets.map(s => s.files.length));
+  console.log(`Building banner: ${minFrames} frames at ${FPS}fps`);
 
-  const BANNER_W = 744;
-  const BANNER_H = 400;
-  const PANEL_W = 248;
-  const PANEL_H = 400;
+  const bannerDir = path.join(os.tmpdir(), `banner_${uid()}`);
+  fs.mkdirSync(bannerDir, { recursive: true });
 
-  const framesDir = path.join(os.tmpdir(), `banner_${uid()}`);
-  fs.mkdirSync(framesDir, { recursive: true });
+  // Process frames in small batches to limit memory
+  for (let i = 0; i < minFrames; i += BATCH_SIZE) {
+    const batchEnd = Math.min(i + BATCH_SIZE, minFrames);
+    for (let j = i; j < batchEnd; j++) {
+      const panels = await Promise.all(
+        frameSets.map(set =>
+          sharp(set.files[j])
+            .resize(PANEL_W, PANEL_H, { fit: 'cover', position: 'centre' })
+            .png()
+            .toBuffer()
+        )
+      );
 
-  for (let i = 0; i < minFrames; i++) {
-    const panels = await Promise.all(
-      frameRows.map(frames =>
-        sharp(frames[i])
-          .resize(PANEL_W, PANEL_H, { fit: 'cover', position: 'centre' })
-          .png()
-          .toBuffer()
-      )
-    );
+      const composite = await sharp({
+        create: { width: BANNER_W, height: BANNER_H, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 1 } }
+      })
+        .composite([
+          { input: panels[0], left: 0, top: 0 },
+          { input: panels[1], left: PANEL_W, top: 0 },
+          { input: panels[2], left: PANEL_W * 2, top: 0 }
+        ])
+        .png()
+        .toBuffer();
 
-    const composite = await sharp({
-      create: { width: BANNER_W, height: BANNER_H, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 1 } }
-    })
-      .composite([
-        { input: panels[0], left: 0, top: 0 },
-        { input: panels[1], left: PANEL_W, top: 0 },
-        { input: panels[2], left: PANEL_W * 2, top: 0 }
-      ])
-      .png()
-      .toBuffer();
-
-    fs.writeFileSync(path.join(framesDir, `frame_${String(i).padStart(4, '0')}.png`), composite);
+      fs.writeFileSync(path.join(bannerDir, `frame_${String(j).padStart(4, '0')}.png`), composite);
+    }
+    console.log(`Composited frames ${i} to ${batchEnd - 1}`);
   }
 
-  console.log(`Composited ${minFrames} banner frames, generating GIF...`);
+  // Cleanup source frame dirs
+  frameSets.forEach(set => {
+    try { fs.rmSync(set.dir, { recursive: true }); } catch(e) {}
+  });
 
+  console.log('Generating final GIF...');
   const outputGif = path.join(os.tmpdir(), `banner_${uid()}.gif`);
   await new Promise((resolve, reject) => {
     ffmpeg()
-      .input(path.join(framesDir, 'frame_%04d.png'))
-      .inputOptions([`-framerate ${fps}`])
+      .input(path.join(bannerDir, 'frame_%04d.png'))
+      .inputOptions([`-framerate ${FPS}`])
       .output(outputGif)
       .outputOptions([
-        '-vf', `fps=${fps},split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse`,
+        '-vf', `fps=${FPS},split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse`,
         '-loop', '0'
       ])
-      .on('start', (cmd) => console.log('Banner GIF command:', cmd))
-      .on('end', () => {
-        console.log('Banner GIF created');
-        resolve();
-      })
+      .on('end', resolve)
       .on('error', (err) => {
         console.error('Banner GIF error:', err.message);
         reject(err);
@@ -231,8 +217,7 @@ async function buildAnimatedBanner(frameRows, fps) {
       .run();
   });
 
-  fs.readdirSync(framesDir).forEach(f => fs.unlinkSync(path.join(framesDir, f)));
-  fs.rmdirSync(framesDir);
+  try { fs.rmSync(bannerDir, { recursive: true }); } catch(e) {}
 
   const gifBuf = fs.readFileSync(outputGif);
   fs.unlinkSync(outputGif);
@@ -242,17 +227,16 @@ async function buildAnimatedBanner(frameRows, fps) {
 
 app.post('/preview-clip', async (req, res) => {
   try {
-    console.log('Body received:', JSON.stringify(req.body));
+    console.log('Preview body:', JSON.stringify(req.body));
     const url = unwrap(req.body.url);
     const start = unwrap(req.body.start);
     const duration = unwrap(req.body.duration);
     if (!url) return res.status(400).json({ error: 'URL is required' });
     const clipFile = await downloadClip(url);
     const gifBuf = await extractGifFromFile(clipFile, start, duration);
-    console.log('Sending GIF preview response');
     res.json({ previewUrl: `data:image/gif;base64,${gifBuf.toString('base64')}` });
   } catch (err) {
-    console.error('Error:', err.message);
+    console.error('Preview error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -263,39 +247,34 @@ app.post('/generate-banner', async (req, res) => {
     const { clips } = req.body;
     if (!clips || clips.length !== 3) return res.status(400).json({ error: 'Exactly 3 clips required' });
 
-    const FPS = 10;
-
-    // Unwrap any array values from WeWeb
     const normalizedClips = clips.map((clip, i) => {
       const url = unwrap(clip.url);
-      const start = unwrap(clip.start);
-      const duration = unwrap(clip.duration);
       if (!url) throw new Error(`Clip ${i + 1} has no URL`);
-      return { url, start, duration };
+      return {
+        url,
+        start: unwrap(clip.start),
+        duration: unwrap(clip.duration)
+      };
     });
 
-    console.log('Normalized clips:', JSON.stringify(normalizedClips));
+    console.log('Processing clips sequentially...');
+    const frameSets = [];
 
-    // Download all 3 clips in parallel
-    console.log('Downloading all 3 clips...');
-    const clipFiles = await Promise.all(normalizedClips.map(clip => downloadClip(clip.url)));
+    // Download and extract frames one at a time to save memory
+    for (const [i, clip] of normalizedClips.entries()) {
+      console.log(`Clip ${i + 1}: downloading...`);
+      const clipFile = await downloadClip(clip.url);
+      console.log(`Clip ${i + 1}: extracting frames...`);
+      const frameSet = await extractFramesToDisk(clipFile, clip.start, clip.duration, FPS);
+      try { fs.unlinkSync(clipFile); } catch(e) {}
+      frameSets.push(frameSet);
+      console.log(`Clip ${i + 1}: done`);
+    }
 
-    // Extract frames from all 3 clips in parallel
-    console.log('Extracting frames from all 3 clips...');
-    const frameRows = await Promise.all(
-      clipFiles.map((file, i) => extractFrames(file, normalizedClips[i].start, normalizedClips[i].duration, FPS))
-    );
-
-    // Cleanup clip files
-    clipFiles.forEach(f => { try { fs.unlinkSync(f); } catch(e) {} });
-
-    // Build animated banner
-    const bannerGif = await buildAnimatedBanner(frameRows, FPS);
-
-    console.log('Sending banner response');
+    const bannerGif = await buildAnimatedBanner(frameSets);
     res.json({ bannerUrl: `data:image/gif;base64,${bannerGif.toString('base64')}` });
   } catch (err) {
-    console.error('Error:', err.message);
+    console.error('Generate error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
