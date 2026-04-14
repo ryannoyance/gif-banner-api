@@ -9,6 +9,9 @@ const https = require('https');
 const { exec } = require('child_process');
 const YTDlpWrap = require('yt-dlp-wrap').default;
 
+const ffmpegStatic = require('ffmpeg-static');
+ffmpeg.setFfmpegPath(ffmpegStatic);
+
 const app = express();
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type'] }));
 app.options('*', cors());
