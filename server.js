@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const ffmpeg = require('fluent-ffmpeg');
+const { execSync } = require('child_process');
 const sharp = require('sharp');
 const fs = require('fs');
 const path = require('path');
@@ -8,8 +9,17 @@ const os = require('os');
 const axios = require('axios');
 const YTDlpWrap = require('yt-dlp-wrap').default;
 
-// Use system ffmpeg installed via nixpacks
-ffmpeg.setFfmpegPath('ffmpeg');
+// Detect ffmpeg path: prefer system binary, fall back to ffmpeg-static
+let ffmpegPath;
+try {
+  ffmpegPath = execSync('which ffmpeg').toString().trim();
+  console.log('System ffmpeg found at:', ffmpegPath);
+} catch(e) {
+  console.warn('System ffmpeg not found, falling back to ffmpeg-static');
+  ffmpegPath = require('ffmpeg-static');
+  console.log('ffmpeg-static path:', ffmpegPath);
+}
+ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type'] }));
