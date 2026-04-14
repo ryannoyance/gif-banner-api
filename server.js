@@ -20,14 +20,18 @@ let ytDlp;
 
 async function initYtDlp() {
   console.log('Downloading yt-dlp standalone binary...');
-  await new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(YTDLP_PATH);
-    https.get('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux', res => {
-      res.pipe(file);
-      file.on('finish', () => file.close(resolve));
-    }).on('error', reject);
-  });
+  const axios = require('axios');
+  const response = await axios.get(
+    'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux',
+    { responseType: 'arraybuffer', maxRedirects: 10 }
+  );
+  fs.writeFileSync(YTDLP_PATH, response.data);
   fs.chmodSync(YTDLP_PATH, '755');
+
+  // Verify it's a real binary
+  const size = fs.statSync(YTDLP_PATH).size;
+  console.log(`yt-dlp downloaded, size: ${size} bytes`);
+
   ytDlp = new YTDlpWrap(YTDLP_PATH);
   console.log('yt-dlp ready');
 }
