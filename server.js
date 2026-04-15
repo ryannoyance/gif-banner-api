@@ -51,20 +51,17 @@ async function uploadToCloudinary(filePath) {
     .createHash('sha1')
     .update(`timestamp=${timestamp}${CLOUDINARY_API_SECRET}`)
     .digest('hex');
-
   const form = new FormData();
   form.append('file', fs.createReadStream(filePath));
   form.append('api_key', CLOUDINARY_API_KEY);
   form.append('timestamp', timestamp.toString());
   form.append('signature', signature);
   form.append('resource_type', 'image');
-
   const response = await axios.post(
     `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
     form,
     { headers: form.getHeaders() }
   );
-
   console.log('Cloudinary upload complete:', response.data.secure_url);
   return response.data.secure_url;
 }
@@ -92,7 +89,34 @@ async function initYtDlp() {
   console.log('yt-dlp ready');
 }
 
+// GET /
 app.get('/', (req, res) => res.json({ status: 'ok', service: 'gif-banner-api' }));
+
+// GET /clip-info?url=<video_url>
+// Returns { duration, title, thumbnail } without downloading the full video.
+app.get('/clip-info', async (req, res) => {
+  try {
+    const url = req.query.url;
+    if (!url) return res.status(400).json({ error: 'url query param is required' });
+    console.log('clip-info for:', url);
+    const raw = await ytDlp.execPromise([
+      url,
+      '--dump-json',
+      '--skip-download',
+      '--no-playlist',
+      '--socket-timeout', '30'
+    ]);
+    const data = JSON.parse(raw);
+    res.json({
+      duration:  data.duration  || null,
+      title:     data.title     || null,
+      thumbnail: data.thumbnail || null
+    });
+  } catch (err) {
+    console.error('clip-info error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 async function downloadClip(url) {
   const tmpFile = path.join(os.tmpdir(), `clip_${uid()}.mp4`);
@@ -119,19 +143,39 @@ function getVideoDuration(filePath) {
   });
 }
 
-function extractFramesToDisk(filePath, startTime, duration, fps) {
+/**
+ * Build the ffmpeg crop filter prefix from normalised 0-1 crop params.
+ * Returns "crop=iw*W:ih*H:iw*X:ih*Y," or "" when crop is falsy.
+ */
+function buildCropFilter(crop) {
+  if (!crop) return '';
+  const x = Math.max(0, Math.min(1, Number(crop.x || 0)));
+  const y = Math.max(0, Math.min(1, Number(crop.y || 0)));
+  const w = Math.max(0.01, Math.min(1, Number(crop.w || 1)));
+  const h = Math.max(0.01, Math.min(1, Number(crop.h || 1)));
+  return `crop=iw*${w}:ih*${h}:iw*${x}:ih*${y},`;
+}
+
+/**
+ * Extract frames to disk.
+ * crop = { x, y, w, h } normalised 0-1, optional
+ */
+function extractFramesToDisk(filePath, startTime, duration, fps, crop) {
   return new Promise(async (resolve, reject) => {
     const videoDuration = await getVideoDuration(filePath);
-    const safeStart = Math.min(parseFloat(startTime || 0), videoDuration - 0.5);
-    const safeDuration = Math.min(parseFloat(duration || 5), videoDuration - safeStart);
-    const framesDir = path.join(os.tmpdir(), `frames_${uid()}`);
+    const safeStart    = Math.min(parseFloat(startTime || 0), videoDuration - 0.5);
+    const safeDuration = Math.min(parseFloat(duration  || 5), videoDuration - safeStart);
+    const framesDir    = path.join(os.tmpdir(), `frames_${uid()}`);
     fs.mkdirSync(framesDir, { recursive: true });
-    console.log(`Extracting frames: start=${safeStart}s duration=${safeDuration}s fps=${fps}`);
+
+    const cropFilter = buildCropFilter(crop);
+    const vfFilter   = `${cropFilter}fps=${fps}`;
+    console.log(`Extracting frames: start=${safeStart}s duration=${safeDuration}s fps=${fps} crop=${cropFilter || 'none'}`);
 
     ffmpeg(filePath)
       .seekInput(safeStart)
       .duration(safeDuration)
-      .fps(fps)
+      .outputOptions(['-vf', vfFilter])
       .output(path.join(framesDir, 'frame_%04d.png'))
       .on('end', () => {
         const files = fs.readdirSync(framesDir)
@@ -150,21 +194,26 @@ function extractFramesToDisk(filePath, startTime, duration, fps) {
   });
 }
 
-function extractGifFromFile(filePath, startTime, duration) {
+/**
+ * Extract a short preview GIF.
+ * crop = { x, y, w, h } normalised 0-1, optional
+ */
+function extractGifFromFile(filePath, startTime, duration, crop) {
   return new Promise(async (resolve, reject) => {
     const videoDuration = await getVideoDuration(filePath);
-    const safeStart = Math.min(parseFloat(startTime || 0), videoDuration - 1);
-    const safeDuration = Math.min(parseFloat(duration || 5), videoDuration - safeStart);
+    const safeStart    = Math.min(parseFloat(startTime || 0), videoDuration - 1);
+    const safeDuration = Math.min(parseFloat(duration  || 5), videoDuration - safeStart);
     console.log(`Extracting GIF: start=${safeStart}s duration=${safeDuration}s`);
+
+    const cropFilter = buildCropFilter(crop);
+    const vfFilter   = `${cropFilter}fps=10,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse`;
 
     const tmpGif = path.join(os.tmpdir(), `preview_${uid()}.gif`);
     ffmpeg(filePath)
       .seekInput(safeStart)
       .duration(safeDuration)
       .output(tmpGif)
-      .outputOptions([
-        '-vf', 'fps=10,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse'
-      ])
+      .outputOptions(['-vf', vfFilter])
       .on('end', () => {
         if (!fs.existsSync(tmpGif)) {
           try { fs.unlinkSync(filePath); } catch(e) {}
@@ -188,7 +237,6 @@ function extractGifFromFile(filePath, startTime, duration) {
 async function buildAnimatedBanner(frameSets) {
   const minFrames = Math.min(...frameSets.map(s => s.files.length));
   console.log(`Building banner: ${minFrames} frames at ${FPS}fps`);
-
   const bannerDir = path.join(os.tmpdir(), `banner_${uid()}`);
   fs.mkdirSync(bannerDir, { recursive: true });
 
@@ -207,8 +255,8 @@ async function buildAnimatedBanner(frameSets) {
         create: { width: BANNER_W, height: BANNER_H, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 1 } }
       })
         .composite([
-          { input: panels[0], left: 0, top: 0 },
-          { input: panels[1], left: PANEL_W, top: 0 },
+          { input: panels[0], left: 0,          top: 0 },
+          { input: panels[1], left: PANEL_W,     top: 0 },
           { input: panels[2], left: PANEL_W * 2, top: 0 }
         ])
         .png()
@@ -245,15 +293,21 @@ async function buildAnimatedBanner(frameSets) {
   return outputGif;
 }
 
+// POST /preview-clip
+// Body: { url, start, duration, crop? }
+// crop: { x, y, w, h } normalised 0-1
 app.post('/preview-clip', async (req, res) => {
   try {
     console.log('Preview body:', JSON.stringify(req.body));
-    const url = unwrap(req.body.url);
-    const start = unwrap(req.body.start);
+    const url      = unwrap(req.body.url);
+    const start    = unwrap(req.body.start);
     const duration = unwrap(req.body.duration);
+    const crop     = req.body.crop || null;
+
     if (!url) return res.status(400).json({ error: 'URL is required' });
+
     const clipFile = await downloadClip(url);
-    const gifBuf = await extractGifFromFile(clipFile, start, duration);
+    const gifBuf   = await extractGifFromFile(clipFile, start, duration, crop);
     res.json({ previewUrl: `data:image/gif;base64,${gifBuf.toString('base64')}` });
   } catch (err) {
     console.error('Preview error:', err.message);
@@ -261,6 +315,8 @@ app.post('/preview-clip', async (req, res) => {
   }
 });
 
+// POST /generate-banner
+// Body: { clips: [{ url, start, duration, crop? }, x3] }
 app.post('/generate-banner', async (req, res) => {
   try {
     console.log('Generate banner body:', JSON.stringify(req.body));
@@ -270,25 +326,27 @@ app.post('/generate-banner', async (req, res) => {
     const normalizedClips = clips.map((clip, i) => {
       const url = unwrap(clip.url);
       if (!url) throw new Error(`Clip ${i + 1} has no URL`);
-      return { url, start: unwrap(clip.start), duration: unwrap(clip.duration) };
+      return {
+        url,
+        start:    unwrap(clip.start),
+        duration: unwrap(clip.duration),
+        crop:     clip.crop || null
+      };
     });
 
     console.log('Processing clips sequentially...');
     const frameSets = [];
-
     for (const [i, clip] of normalizedClips.entries()) {
-      console.log(`Clip ${i + 1}: downloading...`);
+      console.log(`Clip ${i + 1}: downloading...');
       const clipFile = await downloadClip(clip.url);
       console.log(`Clip ${i + 1}: extracting frames...`);
-      const frameSet = await extractFramesToDisk(clipFile, clip.start, clip.duration, FPS);
+      const frameSet = await extractFramesToDisk(clipFile, clip.start, clip.duration, FPS, clip.crop);
       try { fs.unlinkSync(clipFile); } catch(e) {}
       frameSets.push(frameSet);
       console.log(`Clip ${i + 1}: done`);
     }
 
-    const gifPath = await buildAnimatedBanner(frameSets);
-
-    // Upload to Cloudinary and return public URL
+    const gifPath   = await buildAnimatedBanner(frameSets);
     const publicUrl = await uploadToCloudinary(gifPath);
     try { fs.unlinkSync(gifPath); } catch(e) {}
 
