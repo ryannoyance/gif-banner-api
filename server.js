@@ -8,6 +8,7 @@ const path = require('path');
 const os = require('os');
 const axios = require('axios');
 const crypto = require('crypto');
+const FormData = require('form-data');
 const YTDlpWrap = require('yt-dlp-wrap').default;
 
 // Detect ffmpeg path: prefer system binary, fall back to ffmpeg-static
@@ -36,7 +37,37 @@ const BANNER_W = 744;
 const BANNER_H = 400;
 const PANEL_W = 248;
 const PANEL_H = 400;
-const BATCH_SIZE = 5; // composite frames in batches to limit memory
+const BATCH_SIZE = 5;
+
+// Cloudinary config
+const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || 'root';
+const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY || '534429829986323';
+const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || 'Ers1ctVM1qLhXFbB9sxeza1WQmw';
+
+async function uploadToCloudinary(filePath) {
+  console.log('Uploading to Cloudinary...');
+  const timestamp = Math.floor(Date.now() / 1000);
+  const signature = crypto
+    .createHash('sha1')
+    .update(`timestamp=${timestamp}${CLOUDINARY_API_SECRET}`)
+    .digest('hex');
+
+  const form = new FormData();
+  form.append('file', fs.createReadStream(filePath));
+  form.append('api_key', CLOUDINARY_API_KEY);
+  form.append('timestamp', timestamp.toString());
+  form.append('signature', signature);
+  form.append('resource_type', 'image');
+
+  const response = await axios.post(
+    `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
+    form,
+    { headers: form.getHeaders() }
+  );
+
+  console.log('Cloudinary upload complete:', response.data.secure_url);
+  return response.data.secure_url;
+}
 
 function unwrap(val) {
   if (Array.isArray(val)) return val[0];
@@ -88,7 +119,6 @@ function getVideoDuration(filePath) {
   });
 }
 
-// Extract frames to disk, return array of file paths (not buffers)
 function extractFramesToDisk(filePath, startTime, duration, fps) {
   return new Promise(async (resolve, reject) => {
     const videoDuration = await getVideoDuration(filePath);
@@ -108,7 +138,7 @@ function extractFramesToDisk(filePath, startTime, duration, fps) {
           .filter(f => f.endsWith('.png'))
           .sort()
           .map(f => path.join(framesDir, f));
-        console.log(`Extracted ${files.length} frames to ${framesDir}`);
+        console.log(`Extracted ${files.length} frames`);
         resolve({ files, dir: framesDir });
       })
       .on('error', (err) => {
@@ -120,7 +150,6 @@ function extractFramesToDisk(filePath, startTime, duration, fps) {
   });
 }
 
-// Extract a single GIF preview for one clip
 function extractGifFromFile(filePath, startTime, duration) {
   return new Promise(async (resolve, reject) => {
     const videoDuration = await getVideoDuration(filePath);
@@ -156,7 +185,6 @@ function extractGifFromFile(filePath, startTime, duration) {
   });
 }
 
-// Build animated GIF banner sequentially in batches
 async function buildAnimatedBanner(frameSets) {
   const minFrames = Math.min(...frameSets.map(s => s.files.length));
   console.log(`Building banner: ${minFrames} frames at ${FPS}fps`);
@@ -164,7 +192,6 @@ async function buildAnimatedBanner(frameSets) {
   const bannerDir = path.join(os.tmpdir(), `banner_${uid()}`);
   fs.mkdirSync(bannerDir, { recursive: true });
 
-  // Process frames in small batches to limit memory
   for (let i = 0; i < minFrames; i += BATCH_SIZE) {
     const batchEnd = Math.min(i + BATCH_SIZE, minFrames);
     for (let j = i; j < batchEnd; j++) {
@@ -176,7 +203,6 @@ async function buildAnimatedBanner(frameSets) {
             .toBuffer()
         )
       );
-
       const composite = await sharp({
         create: { width: BANNER_W, height: BANNER_H, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 1 } }
       })
@@ -187,13 +213,11 @@ async function buildAnimatedBanner(frameSets) {
         ])
         .png()
         .toBuffer();
-
       fs.writeFileSync(path.join(bannerDir, `frame_${String(j).padStart(4, '0')}.png`), composite);
     }
     console.log(`Composited frames ${i} to ${batchEnd - 1}`);
   }
 
-  // Cleanup source frame dirs
   frameSets.forEach(set => {
     try { fs.rmSync(set.dir, { recursive: true }); } catch(e) {}
   });
@@ -218,11 +242,7 @@ async function buildAnimatedBanner(frameSets) {
   });
 
   try { fs.rmSync(bannerDir, { recursive: true }); } catch(e) {}
-
-  const gifBuf = fs.readFileSync(outputGif);
-  fs.unlinkSync(outputGif);
-  console.log('Final banner GIF size:', gifBuf.length, 'bytes');
-  return gifBuf;
+  return outputGif;
 }
 
 app.post('/preview-clip', async (req, res) => {
@@ -250,17 +270,12 @@ app.post('/generate-banner', async (req, res) => {
     const normalizedClips = clips.map((clip, i) => {
       const url = unwrap(clip.url);
       if (!url) throw new Error(`Clip ${i + 1} has no URL`);
-      return {
-        url,
-        start: unwrap(clip.start),
-        duration: unwrap(clip.duration)
-      };
+      return { url, start: unwrap(clip.start), duration: unwrap(clip.duration) };
     });
 
     console.log('Processing clips sequentially...');
     const frameSets = [];
 
-    // Download and extract frames one at a time to save memory
     for (const [i, clip] of normalizedClips.entries()) {
       console.log(`Clip ${i + 1}: downloading...`);
       const clipFile = await downloadClip(clip.url);
@@ -271,8 +286,14 @@ app.post('/generate-banner', async (req, res) => {
       console.log(`Clip ${i + 1}: done`);
     }
 
-    const bannerGif = await buildAnimatedBanner(frameSets);
-    res.json({ bannerUrl: `data:image/gif;base64,${bannerGif.toString('base64')}` });
+    const gifPath = await buildAnimatedBanner(frameSets);
+
+    // Upload to Cloudinary and return public URL
+    const publicUrl = await uploadToCloudinary(gifPath);
+    try { fs.unlinkSync(gifPath); } catch(e) {}
+
+    console.log('Sending banner URL:', publicUrl);
+    res.json({ bannerUrl: publicUrl });
   } catch (err) {
     console.error('Generate error:', err.message);
     res.status(500).json({ error: err.message });
