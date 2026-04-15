@@ -40,7 +40,7 @@ const PANEL_H = 400;
 const BATCH_SIZE = 5;
 
 // Cloudinary config
-const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || 'root';
+const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || 'dzd3jzfgz';
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY || '534429829986323';
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || 'Ers1ctVM1qLhXFbB9sxeza1WQmw';
 
